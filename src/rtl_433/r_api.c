@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "pulse_slicer.h"
+#include "pulse_analyzer.h"
 #include "r_device.h"
 #include "r_private.h"
 #include "r_util.h"
