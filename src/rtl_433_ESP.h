@@ -424,6 +424,11 @@ private:
    */
   static void interruptHandler();
 
+  static volatile uint32_t carrierSenseCount;
+  static volatile bool carrierSenseDetect;
+  
+  static void carrierSenseHandler();
+
   /**
    * interruptHandler used to calibrate OOK floor threshold
    */

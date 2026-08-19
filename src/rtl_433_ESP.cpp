@@ -171,6 +171,16 @@ rtl_433_ESP::rtl_433_ESP() {
       RECEIVER_BUFFER_SIZE, sizeof(pulse_data_t), MALLOC_CAP_INTERNAL);
 }
 
+volatile uint32_t rtl_433_ESP::carrierSenseCount = 0;
+volatile bool rtl_433_ESP::carrierSenseDetect = LOW;
+
+void ICACHE_RAM_ATTR rtl_433_ESP::carrierSenseHandler() {
+  carrierSenseDetect = digitalRead(RF_MODULE_GDO2);
+  if (carrierSenseDetect) {
+    carrierSenseCount = carrierSenseCount + 1;
+  }
+}
+
 /**
  * @brief Initialize Transceiver and rtl_433 decoders
  * 
@@ -241,15 +251,36 @@ void rtl_433_ESP::initReceiver(byte inputPin, float receiveFrequency) {
     state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_PKTLEN, 0);
     RADIOLIB_STATE(state, "set PKTLEN");
 
+    state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_IOCFG2, RADIOLIB_CC1101_GDOX_CARRIER_SENSE); // Carrier Sense on GDO2
+    RADIOLIB_STATE(state, "set IOCFG2");
+
+    // Pulled from SmartRF Studio 7
+    // HYST_LEVEL = 2 Sets the level of hysteresis on the magnitude deviation (internal AGC signal that determine gain changes).
+    // 2 (10) : Medium hysteresis, medium asymmetric dead zone, medium gain
+    // WAIT_TIME = 3 Sets the number of channel filter samples from a gain adjustment has been made until the AGC algorithm starts accumulating new samples.
+    // 3 (11) : 32
+    // FILTER_LENGTH = 2 Sets the averaging length for the amplitude from the channel filter. Sets the OOK/ASK decision boundary for OOK/ASK reception. 
+    // Setting | Channel filter samples  | OOK/ASK decision boundary 
+    // 2 (10)  | 32                      | 12 dB 
+    state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_AGCCTRL0, RADIOLIB_CC1101_HYST_LEVEL_MEDIUM | RADIOLIB_CC1101_WAIT_TIME_32_SAMPLES | RADIOLIB_CC1101_FILTER_LENGTH_32);
+    RADIOLIB_STATE(state, "set AGCCTRL0");
+    
+    // AGC_LNA_PRIORITY = 0
+    // CARRIER_SENSE_REL_THR = 3 for 14 dB increase in RSSI value
+    state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_AGCCTRL1, RADIOLIB_CC1101_AGC_LNA_PRIORITY_LNA2 | RADIOLIB_CC1101_CARRIER_SENSE_REL_THR_14_DB);
+    RADIOLIB_STATE(state, "set AGCCTRL1");
+    pinMode(RF_MODULE_GDO2, INPUT);
+    attachInterrupt(digitalPinToInterrupt(RF_MODULE_GDO2), carrierSenseHandler, CHANGE);
+
     // Settings borrowed from lsatan
 
     state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_AGCCTRL2, CC1101_AGCCTRL2);
     RADIOLIB_STATE(state, "set AGCCTRL2");
 
-    state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_MDMCFG3, 0x93); // Data rate
+    state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_MDMCFG3, 0x93); // Data rate 4.9963 kBaud
     RADIOLIB_STATE(state, "set MDMCFG3");
 
-    state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_MDMCFG4, 0x07); // Bandwidth
+    state = radio.SPIsetRegValue(RADIOLIB_CC1101_REG_MDMCFG4, 0x77); // Bandwidth 232.142857 kHz : I read somewhere that Carrier Sense doesn't work well with a wide open filter.
     RADIOLIB_STATE(state, "set MDMCFG4");
   } else {
     // From https://github.com/matthias-bs/BresserWeatherSensorReceiver/issues/41#issuecomment-1458166772
@@ -270,7 +301,7 @@ void rtl_433_ESP::initReceiver(byte inputPin, float receiveFrequency) {
     state = radio.setRxBandwidth(270); // Sweet spot found from testing
     RADIOLIB_STATE(state, "setRxBandwidth");
   }
-  state = radio.disableSyncWordFiltering(false);
+  state = radio.disableSyncWordFiltering(true);
   RADIOLIB_STATE(state, "disableSyncWordFiltering");
 #endif
 
@@ -443,7 +474,7 @@ void ICACHE_RAM_ATTR rtl_433_ESP::interruptHandler() {
   /* We first do some filtering (same as pilight BPF) */
 
 #ifdef RF_CC1101
-  if (duration > MINIMUM_PULSE_LENGTH && currentRssi > rssiThreshold)
+  if (duration > MINIMUM_PULSE_LENGTH && carrierSenseDetect)
 #else
   if (duration > MINIMUM_PULSE_LENGTH) // SX127X RSSI Value drops for a 0 value,
   // and the OOK floor compensates for this
@@ -677,7 +708,7 @@ void rtl_433_ESP::rtl_433_ReceiverTask(void* pvParameters) {
       }
 #endif
 
-      if (currentRssi > rssiThreshold) // A signal is present
+      if (carrierSenseDetect) // A signal is present
       {
         if (!receiveMode) {
           receiveMode = true;
@@ -793,6 +824,7 @@ void rtl_433_ESP::rtl_433_ReceiverTask(void* pvParameters) {
 #ifdef DEMOD_DEBUG
             logprintf(LOG_INFO, "Signal length: %lu",
                       _pulseTrains[_actualPulseTrain].signalDuration);
+            alogprintf(LOG_INFO, ", Carrier Sense Count: %" PRIu32, carrierSenseCount);
             alogprintf(LOG_INFO, ", Gap length: %lu",
                        elapsedMicrosOrZero(signalStart, gapStart));
             alogprintf(LOG_INFO, ", Signal RSSI: %d",
